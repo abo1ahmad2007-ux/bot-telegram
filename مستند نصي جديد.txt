@@ -1,0 +1,1080 @@
+السيكربت
+/**
+• 🏛️ منظومة الإدارة الجامعية المتكاملة لجامعة AUST - الإصدار الخارق V6.0 الـ Ultimate
+• نظام إدارة محتوى كامل (Bot CMS) + لوحة تحكم سحابية للأدمن العام وأدمن الكليات
+• مذكر امتحانات، حاسبة معدل GPA، أرشيف إعلانات، توثيق، حظر، وسجل رقابة كامل.
+*/
+
+var token = "8473271051:AAGDXPXVDOu_hyNJ4SkX4CXTPyhLCFmgRQs";
+var ssId = "13cfsS7HwFpwfQGH8AHhnQZz83zfDTczDYfUC-3JZtT8";
+var adminId = 8374754679;
+
+var config = PropertiesService.getScriptProperties();
+var faculties = ["هندسة المعلوماتية", "هندسة البترول", "طب الاسنان", "الصيدلة", "هندسة الصناعات الكيميائية", "الهندسة المعمارية", "الترجمة واللغات"];
+
+// ========================================================
+// 🔄 المحرك الأساسي لاستقبال البيانات ومعالجتها
+// ========================================================
+function doPost(e) {
+try {
+checkAndSetupSheets();
+
+var data = JSON.parse(e.postData.contents);
+if (data.callback_query) { handleCallbacks(data.callback_query); return; }
+if (!data.message) return;
+
+var chatId = data.message.chat.id;
+var text = data.message.text ? data.message.text.trim() : "";
+var state = config.getProperty(chatId);
+
+// 🛡️ نظام حماية الأزرار من السبام (Rate-Limiting)
+if (isSpamming(chatId)) {
+sendTextRaw(chatId, "⚠️ العمليات سريعة جداً! يرجى الانتظار 3 ثوانٍ بين الضغطات لحماية السيرفر.");
+return;
+}
+
+// 🚫 التحقق من نظام الحظر المركزي
+if (isUserBanned(chatId)) {
+sendTextRaw(chatId, "🚫 تم حظر حسابك من استخدام المنظومة نظراً لإساءة الاستخدام. لمراجعة الإدارة تواصل مع الدعم.");
+return;
+}
+
+// تحديث النشاط اليومي للطالب لحساب الإحصائيات المتقدمة
+if (text !== "") {
+config.setProperty("LAST_SEEN_" + chatId, Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd"));
+}
+
+// فحص الرتب والصلاحيات
+var isSuperAdmin = (chatId === adminId || checkUserRole(chatId, "أدمن عام"));
+var facultyDetails = getSubAdminFacultyAndRole(chatId); // يعيد كائن يحتوي على الكلية والرتبة الفرعية
+
+// ========================================================
+// 🧪 وضع الاختبار المتقدم (Sandbox Mode)
+// ========================================================
+if (config.getProperty("SANDBOX_MODE_" + chatId) === "true" && text === "🔙 إنهاء وضع الاختبار") {
+config.deleteProperty("SANDBOX_MODE_" + chatId);
+config.deleteProperty("SANDBOX_FACULTY_" + chatId);
+config.deleteProperty("SANDBOX_YEAR_" + chatId);
+sendText(chatId, "🟢 تم إنهاء وضع الاختبار المتقدم بنجاح والعودة للوحة الإدارة العليا.");
+return;
+}
+
+// إذا كان وضع الاختبار مفعل، نقوم بتزييف بيانات الكلية والسنة للأدمن لتجربة واجهة الطالب بدقة
+var testUser = null;
+if (config.getProperty("SANDBOX_MODE_" + chatId) === "true") {
+testUser = {
+name: "حساب أدمن تجريبي 🧪",
+phone: "+963900000000",
+uniId: "99999",
+faculty: config.getProperty("SANDBOX_FACULTY_" + chatId),
+year: config.getProperty("SANDBOX_YEAR_" + chatId)
+};
+}
+
+// ========================================================
+// [1] التحقق المطلق والبدئي من الاشتراك الإجباري
+// ========================================================
+if (!isSuperAdmin && !facultyDetails && !testUser) {
+if (!checkRequiredChannels(chatId)) {
+sendRequiredChannelsMessage(chatId);
+return;
+} else {
+logChannelSubscriber(chatId, data.message.from.first_name, data.message.from.username);
+}
+}
+
+// ========================================================
+// [2] وضع الصيانة المستقل
+// ========================================================
+var isMaintenance = config.getProperty("MAINTENANCE_MODE") === "true";
+if (isMaintenance && !isSuperAdmin) {
+sendTextRaw(chatId, "⚠️ السيرفر حالياً في وضع الصيانة المتقدم لتحديث الأنظمة وقوالب المواسم.. نعود إليكم قريباً.");
+return;
+}
+
+// ========================================================
+// [3] لوحة تحكم الإدارة العليا (Super Admin Panel)
+// ========================================================
+if (isSuperAdmin && config.getProperty("SANDBOX_MODE_" + chatId) !== "true") {
+if (text === "/start" || text === "🔙 لوحة الإدارة العليا" || text === "⚠️ صندوق الشكاوى المركزي" ||
+text === "📊 تصدير التقارير المتقدمة" || text === "🕒 جدولة الإعلانات" || text === "🚫 إدارة الحظر والتنبيهات" ||
+text === "💬 تواصل مباشر مع طالب" || text === "🧪 وضع الاختبار المتقدم" || text === "⚙️ إعدادات نصوص الأزرار (CMS)" ||
+text === "🔧 وضع الصيانة المستقل" || text === "👥 إدارة المشرفين والصلاحيات" || text === "📉 جلب نسخة احتياطية فورية") {
+
+handleSuperAdminLogic(chatId, text, state);
+return;
+}
+}
+
+// ========================================================
+// [4] لوحة تحكم أدمن الكليات والاقسام (Sub-Admin Panel)
+// ========================================================
+if (facultyDetails && config.getProperty("SANDBOX_MODE_" + chatId) !== "true" && !isSuperAdmin) {
+if (text === "/start" || text === "🔙 لوحة الكلية" || text === "📥 صندوق شكاوى الكلية" ||
+text === "📢 إعلانات الكلية الموجهة" || text === "👥 إدارة طلاب الكلية" || text === "🎛️ تخصيص محلي للأزرار") {
+
+handleSubAdminLogic(chatId, text, state, facultyDetails);
+return;
+}
+}
+
+// ========================================================
+// [5] واجهة معالجة الحالات والردود (States Engine)
+// ========================================================
+if (state) {
+handleGlobalStateEngine(chatId, text, state, facultyDetails);
+return;
+}
+
+// ========================================================
+// [6] نظام واجهة الطالب المطور (Dynamic UI Engine)
+// ========================================================
+var userData = testUser || getUserInfo(chatId);
+
+if (text === "/start" || text === "🔙 القائمة الرئيسية للطلاب") {
+if (userData) {
+sendDynamicStudentMenu(chatId, userData);
+} else {
+config.setProperty(chatId, "WAIT_NAME");
+sendText(chatId, "🏛️ مرحباً بك في منظومة جامعة AUST المطورة.\nيرجى تسجيل بياناتك الرسمية للمرة الأولى لتوثيق الحساب والوصول للخدمات.\n\nأرسل اسمك الثلاثي كالتالي (أحمد محمد علي):", {remove_keyboard: true});
+}
+return;
+}
+
+// معالجة الضغط على الأزرار الديناميكية وميزات الطالب الإضافية
+if (userData) {
+handleStudentFeatures(chatId, text, userData, data.message.from.username);
+}
+
+} catch (err) { Logger.log("GLOBAL ERROR: " + err.toString()); }
+}
+
+// ========================================================
+// 🛠️ المحرك الإداري للإدارة العليا (Super Admin)
+// ========================================================
+function handleSuperAdminLogic(chatId, text, state) {
+if (text === "/start" || text === "🔙 لوحة الإدارة العليا") {
+config.deleteProperty(chatId);
+var menu = {
+keyboard: [
+[{text: "⚠️ صندوق الشكاوى المركزي"}, {text: "⚙️ إعدادات نصوص الأزرار (CMS)"}],
+[{text: "🕒 جدولة الإعلانات"}, {text: "📊 تصدير التقارير المتقدمة"}],
+[{text: "🚫 إدارة الحظر والتنبيهات"}, {text: "💬 تواصل مباشر مع طالب"}],
+[{text: "👥 إدارة المشرفين والصلاحيات"}, {text: "🧪 وضع الاختبار المتقدم"}],
+[{text: "📉 جلب نسخة احتياطية فورية"}, {text: "🔧 وضع الصيانة المستقل"}]
+],
+resize_keyboard: true
+};
+sendText(chatId, "👑 مرحباً بك يا مدير المنظومة في لوحة التحكم المطلقة V6.0\nكل الأنظمة والعمليات تحت رقابتك وسيطرتك السحابية الآن.", menu);
+return;
+}
+
+if (text === "⚠️ صندوق الشكاوى المركزي") {
+sendCentralTickets(chatId);
+return;
+}
+
+if (text === "📉 جلب نسخة احتياطية فورية") {
+sendSpreadsheetAsExcel(chatId, "نسخة احتياطية فورية كاملة لقواعد بيانات المنظومة");
+logAdminAction(chatId, "طلب نسخة احتياطية كاملة للمنظومة", "الإدارة العليا");
+return;
+}
+
+if (text === "🔧 وضع الصيانة المستقل") {
+var current = config.getProperty("MAINTENANCE_MODE") === "true";
+config.setProperty("MAINTENANCE_MODE", current ? "false" : "true");
+sendText(chatId, !current ? "🔴 تم قفل البوت وتفعيل وضع الصيانة الشامل للطلاب." : "🟢 تم إلغاء الصيانة وفتح الأنظمة بالكامل.");
+logAdminAction(chatId, "تغيير حالة وضع الصيانة إلى: " + (!current), "الإدارة العليا");
+return;
+}
+
+if (text === "💬 تواصل مباشر مع طالب") {
+config.setProperty(chatId, "SADMIN_WAIT_DIRECT_ID");
+sendText(chatId, "📥 أرسل معرف شات الطالب (Chat ID) المراد إرسال رسالة مباشرة وتنبيه له:", {keyboard: [[{text: "🔙 لوحة الإدارة العليا"}]], resize_keyboard: true});
+return;
+}
+
+if (text === "🚫 إدارة الحظر والتنبيهات") {
+config.setProperty(chatId, "SADMIN_WAIT_BAN_ID");
+sendText(chatId, "🚫 قسم التحكم بالحظر المركزي:\nأرسل Chat ID للطالب المراد حظره كلياً أو فك حظره من المنظومة:", {keyboard: [[{text: "🔙 لوحة الإدارة العليا"}]], resize_keyboard: true});
+return;
+}
+
+if (text === "🧪 وضع الاختبار المتقدم") {
+config.setProperty(chatId, "SADMIN_SANDBOX_FAC");
+var rows = []; faculties.forEach(function(f){ rows.push([{text: f, callback_data: "sand_setfac_" + f}]); });
+sendText(chatId, "🧪 بيئة الاختبار المتقدم (Sandbox Mode):\nيرجى أولاً اختيار الكلية التي تريد محاكاة طالب بداخلها لتجربة الأزرار المخصصة لها:", {inline_keyboard: rows});
+return;
+}
+
+if (text === "📊 تصدير التقارير المتقدمة") {
+sendSpreadsheetAsExcel(chatId, "تقرير الإحصائيات السحابية الشامل لجامعة AUST");
+return;
+}
+
+if (text === "⚙️ إعدادات نصوص الأزرار (CMS)") {
+sendText(chatId, "🔄 نظام إدارة المحتوى المطور (Bot CMS V6.0):\nالتحكم الكامل بواجهات الطلاب والأزرار والإخفاء والتعديل يتم الآن بشكل فوري وسحابي عبر جدول البيانات المخصص باسم [Bot_CMS] داخل الشيت الرئيسي.\n\nقم بتعديل النصوص والرموز التعبيرية وتغيير الفئات المستهدفة من الشيت مباشرة وستتحدث واجهة الطالب فوراً!");
+return;
+}
+
+if (text === "🕒 جدولة الإعلانات") {
+config.setProperty(chatId, "SADMIN_WAIT_SCHED_MSG");
+sendText(chatId, "🕒 مساعد جدولة الإعلانات المؤتمتة:\nأرسل نص الإعلان الذي تريد جدولته ونشره مستقبلاً لكافة الطلاب:", {keyboard: [[{text: "🔙 لوحة الإدارة العليا"}]], resize_keyboard: true});
+return;
+}
+}
+
+// ========================================================
+// 🏢 المحرك الإداري لأدمن الكليات (Sub-Admin Panel)
+// ========================================================
+function handleSubAdminLogic(chatId, text, state, facultyDetails) {
+if (text === "/start" || text === "🔙 لوحة الكلية") {
+config.deleteProperty(chatId);
+var menu = {
+keyboard: [
+[{text: "📥 صندوق شكاوى الكلية"}, {text: "📢 إعلانات الكلية الموجهة"}],
+[{text: "👥 إدارة طلاب الكلية"}, {text: "🎛️ تخصيص محلي للأزرار"}],
+[{text: "🔙 لوحة الكلية"}]
+],
+resize_keyboard: true
+};
+sendText(chatId, "🏢 مرحباً بك في لوحة تحكم الكلية والأقسام الفرعية\nالقسم المسؤول عنه: " + facultyDetails.faculty + " \nصلاحيتك الممنوحة: " + facultyDetails.role + " ", menu);
+return;
+}
+
+if (text === "📥 صندوق شكاوى الكلية") {
+if (facultyDetails.role === "مشرف كلية - إعلانات") {
+sendText(chatId, "❌ حسابك يمتلك صلاحية نشر الإعلانات فقط، لا يمكنك إدارة صندوق الشكاوى.");
+return;
+}
+sendSubAdminTickets(chatId, facultyDetails.faculty);
+return;
+}
+
+if (text === "📢 إعلانات الكلية الموجهة") {
+if (facultyDetails.role === "مشرف كلية - شكاوى") {
+sendText(chatId, "❌ حسابك يمتلك صلاحية إدارة الشكاوى فقط، لا يمكنك نشر الإعلانات.");
+return;
+}
+config.setProperty(chatId, "SUB_WAIT_BROADCAST");
+sendText(chatId, "📢 أرسل نص الإعلان المراد توجيهه فقط وحصرياً لطلاب كلية (" + facultyDetails.faculty + "):", {keyboard: [[{text: "🔙 لوحة الكلية"}]], resize_keyboard: true});
+return;
+}
+
+if (text === "👥 إدارة طلاب الكلية") {
+sendText(chatId, getFacultyStats(facultyDetails.faculty));
+return;
+}
+}
+
+// ========================================================
+// ⚙️ نظام معالجة المدخلات والحالات العالمي (States Engine)
+// ========================================================
+function handleGlobalStateEngine(chatId, text, state, facultyDetails) {
+
+// معالجة إرسال شكوى من طالب
+if (state === "WAIT_MSG") {
+var userData = getUserInfo(chatId);
+recordTicket(chatId, text, userData);
+return;
+}
+
+// الرد على شكوى من مشرف
+if (state.startsWith("REPLY_TO_TICKET_")) {
+var parts = state.split("_");
+var studentChatId = parts[3];
+var ticketRow = parts[4];
+
+sendText(studentChatId, "✅ وصلك رد رسمي من ممثلي الهيئة الطلابية بخصوص تذكرتك:\n\n💬 " + text);
+
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("الشكاوى");
+sheet.getRange(ticketRow, 10).setValue("تمت المعالجة");
+sheet.getRange(ticketRow, 12).setValue(text);
+
+config.deleteProperty(chatId);
+sendText(chatId, "✅ تم إرسال الرد وتحديث حالة الشكوى بنجاح.");
+logAdminAction(chatId, "الرد على الشكوى رقم " + (ticketRow-1) + " وإغلاقها", facultyDetails ? facultyDetails.faculty : "الإدارة العليا");
+return;
+}
+
+// التواصل المباشر مع طالب
+if (state === "SADMIN_WAIT_DIRECT_ID") {
+config.setProperty(chatId + "_DIR_ID", text);
+config.setProperty(chatId, "SADMIN_WAIT_DIRECT_MSG");
+sendText(chatId, "✍️ اكتب الرسالة أو التنبيه المراد توجيهه مباشرةً للطالب الآن:");
+return;
+}
+if (state === "SADMIN_WAIT_DIRECT_MSG") {
+var targetId = config.getProperty(chatId + "_DIR_ID");
+sendText(targetId, "💬 رسالة مباشرة من إدارة الهيئة الطلابية العليا:\n\n" + text);
+config.deleteProperty(chatId); config.deleteProperty(chatId + "_DIR_ID");
+sendText(chatId, "✅ تم إرسال الرسالة بنجاح وبسرية تامة.");
+return;
+}
+
+// جدولة إعلانات
+if (state === "SADMIN_WAIT_SCHED_MSG") {
+config.setProperty(chatId + "_SCHED_TXT", text);
+config.setProperty(chatId, "SADMIN_WAIT_SCHED_TIME");
+sendText(chatId, "🕒 الآن حدد وقت وتاريخ النشر بالصيغة التالية تماماً:\nyyyy-MM-dd HH:mm\nمثال: 2026-06-15 14:30");
+return;
+}
+if (state === "SADMIN_WAIT_SCHED_TIME") {
+var sTxt = config.getProperty(chatId + "_SCHED_TXT");
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("الجدولة والنسخ الاحتياطي");
+sheet.appendRow([new Date(), "إعلان مجدول", sTxt, text, "قيد الانتظار"]);
+config.deleteProperty(chatId); config.deleteProperty(chatId + "_SCHED_TXT");
+sendText(chatId, "✅ تم حفظ وجدولة الإعلان بنجاح في قاعدة البيانات وسيتم النشر تلقائياً بالوقت المحدد.");
+return;
+}
+
+// الحظر وإساءة الاستخدام
+if (state === "SADMIN_WAIT_BAN_ID") {
+var targetBanId = text;
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول");
+var data = sheet.getDataRange().getValues();
+var found = false;
+for (var i = 1; i < data.length; i++) {
+if (data[i][5].toString().trim() === targetBanId) {
+var currentStatus = data[i][8] || "";
+var newStatus = currentStatus === "محظور 🚫" ? "نشط ✅" : "محظور 🚫";
+sheet.getRange(i + 1, i === 1 ? 9 : 9).setValue(newStatus); // تعيين حالة الحظر في العمود التاسع
+sendText(chatId, "🔄 تم تغيير حالة حساب الطالب (" + data[i][2] + ") إلى: " + newStatus + " ");
+found = true; break;
+}
+}
+if (!found) sendText(chatId, "❌ لم يتم العثور على طالب يحمل هذا الـ Chat ID.");
+config.deleteProperty(chatId);
+return;
+}
+
+// إعلانات الكلية الفرعية
+if (state === "SUB_WAIT_BROADCAST") {
+config.deleteProperty(chatId);
+sendText(chatId, "⏳ جاري تعميم الإعلان وتوجيهه لكافة طلاب قسمك بالخلفية...");
+broadcastToFacultyStudents(facultyDetails.faculty, text);
+sendText(chatId, "✅ تم نشر الإعلان وتوصيله بنجاح لطلاب كليتك فقط.");
+logAdminAction(chatId, "نشر إعلان موجه ومخصص للكلية", facultyDetails.faculty);
+return;
+}
+
+// التسجيل للمرة الأولى (بيانات الطالب)
+if (state === "WAIT_NAME") {
+config.setProperty(chatId + "_N", text); config.setProperty(chatId, "WAIT_PHONE");
+var phoneKeyboard = { keyboard: [[{ text: "📱 مشاركة رقم الهاتف الرسمي", request_contact: true }]], resize_keyboard: true, one_time_keyboard: true };
+sendText(chatId, "✅ تم حفظ الاسم.\nالآن يرجى الضغط على الزر بالأسفل لمشاركة رقم هاتفك المربوط تليجرام تلقائياً للتوثيق والتحقق البشري:", phoneKeyboard);
+return;
+}
+if (state === "WAIT_PHONE") {
+if (data.message.contact) {
+config.setProperty(chatId + "_P", data.message.contact.phone_number);
+config.setProperty(chatId, "WAIT_UNI");
+sendText(chatId, "✅ تم توثيق رقم الهاتف بنجاح.\nأرسل الآن رقمك الجامعي الرسمي (مثال: 20261012):", {remove_keyboard: true});
+} else {
+sendText(chatId, "⚠️ خطأ! يرجى الضغط على الزر المخصص بالأسفل حصراً لمشاركة رقم الهاتف الحقيقي للتوثيق.");
+}
+return;
+}
+if (state === "WAIT_UNI") {
+config.setProperty(chatId + "_U", text); config.setProperty(chatId, "WAIT_YEAR");
+var yearMenu = { keyboard: [[{text:"سنة أولى"}, {text:"سنة ثانية"}], [{text:"سنة ثالثة"}, {text:"سنة رابعة"}], [{text:"سنة خامسة"}]], resize_keyboard: true };
+sendText(chatId, "🔢 اختر أو اكتب السنة الدراسية الحالية:", yearMenu);
+return;
+}
+if (state === "WAIT_YEAR") {
+config.setProperty(chatId + "_Y", text); config.setProperty(chatId, "WAIT_FACULTY");
+sendFacultyKeyboard(chatId, "🎓 أخيراً، اختر كليتك من الأزرار بالأسفل لإتمام بناء حسابك الموحد:");
+return;
+}
+
+// حاسبة المعدل GPA
+if (state === "WAIT_GPA_CALC") {
+config.deleteProperty(chatId);
+calculateAndSendGPA(chatId, text);
+return;
+}
+
+// خطوط النقل
+if (state === "WAIT_BUS_CITY") {
+config.deleteProperty(chatId);
+sendBusLineDetails(chatId, text);
+return;
+}
+}
+
+// ========================================================
+// 🎓 نظام ميزات الطالب والأزرار الديناميكية (CMS UI Engine)
+// ========================================================
+function handleStudentFeatures(chatId, text, userData, username) {
+
+// معالجة الأقسام الثابتة والذكية
+if (text === "✍️ إرسال شكوى") {
+config.setProperty(chatId, "WAIT_MSG");
+sendText(chatId, "💡 صندوق المقترحات والشكاوى الفورية:\nاكتب تفاصيل موضوعك بوضوح وتأكد أن شكواك ستصل لمشرف كليتك مباشرة بسرية تامة (لإضافة صفة العجالة اكتب كلمة 'عاجل' بالرسالة):", {keyboard: [[{text: "🔙 القائمة الرئيسية للطلاب"}]], resize_keyboard: true});
+return;
+}
+
+if (text === "📮 صندوق تتبع الشكاوى (شكاويّ)") {
+sendStudentTicketTracker(chatId);
+return;
+}
+
+if (text === "🧮 حاسبة المعدل الجامعي GPA") {
+config.setProperty(chatId, "WAIT_GPA_CALC");
+sendText(chatId, "🧮 حاسبة المعدل الفصلي والتراجمي (نظام جامعة AUST):\nأرسل علامات المواد وساعات كل مادة بالشكل التالي تماماً:\nالعلامة:الساعات متتالية لكل مادة في سطر منفصل.\n\nمثال للعلامات:\n85:3\n70:2\n92:3\n45:2(المادة الراسبة تدخل بالحساب تلقائياً)", {keyboard: [[{text: "🔙 القائمة الرئيسية للطلاب"}]], resize_keyboard: true});
+return;
+}
+
+if (text === "🚌 خطوط النقل والخدمات") {
+config.setProperty(chatId, "WAIT_BUS_CITY");
+var busMenu = { keyboard: [[{text: "حماه"}, {text: "ريف حماه - طيبة الإمام"}], [{text: "حمص"}, {text: "بقية المحافظات"}], [{text: "🔙 القائمة الرئيسية للطلاب"}]], resize_keyboard: true };
+sendText(chatId, "🚌 اختر مدينة أو خط الانطلاق لاستعراض مواعيد انطلاق باصات ونقليات الجامعة وتحديثات السائقين الطارئة:", busMenu);
+return;
+}
+
+if (text === "❓ قسم الأسئلة الشائعة الذكي (FAQ)") {
+var faqMenu = { inline_keyboard: [[{text: "📂 الوثائق المطلوبة للتسجيل", callback_data: "faq_docs"}], [{text: "🎖️ شروط الاعتراضات على العلامات", callback_data: "faq_objections"}], [{text: "🎖️ الاستعلام عن تأجيل التجنيد", callback_data: "faq_military"}]] };
+sendText(chatId, "❓ أهلاً بك في قسم الأسئلة الشائعة وعناوين شؤون الطلاب الفورية:\nاختر من الأزرار التفاعلية بالأسفل للحصول على الإجابة فوراً:", faqMenu);
+return;
+}
+
+if (text === "👤 حسابي") {
+var profileBtn = {
+inline_keyboard: [
+[{text: "✍️ تعديل الاسم", callback_data: "mod_name"}, {text: "🎓 تعديل الكلية", callback_data: "mod_faculty"}],
+[{text: "🔢 تعديل الرقم الجامعي", callback_data: "mod_uniid"}]
+]
+};
+sendText(chatId, "👤 ملفك الرقمي الموثق سحابياً:\n\nالاسم الكامل: " + userData.name + "\nالهاتف: " + userData.phone + "\nالرقم الجامعي: " + userData.uniId + "\nالكلية والفرع: " + userData.faculty + "\nالسنة الدراسية: " + userData.year + "\n\n💡 (المعلومات مسجلة وموثقة في خوادم الإدارة تلقائياً)", profileBtn);
+return;
+}
+
+// مذكر الامتحانات والمحاضرات
+if (text === "⏰ مذكر الامتحانات والمحاضرات") {
+sendText(chatId, "⏰ نظام التذكير الذكي الفوري للطلاب:\nسيقوم البوت بإرسال إشعارات تلقائية على حسابك تذكرك بموعد الامتحان والقاعة الامتحانية المخصصة لك قبل 24 ساعة من الانطلاق بناءً على كليتك وسنتك الدراسية.");
+return;
+}
+
+// مراجعة وفحص ومعالجة الأزرار الديناميكية السحابية القادمة من شيت [Bot_CMS]
+var cmsSuccess = handleDynamicCMSButtonPress(chatId, text, userData);
+if (cmsSuccess) return;
+}
+
+// ========================================================
+// 🔄 محرك الأزرار الديناميكية ونظام إدارة المحتوى (Bot CMS)
+// ========================================================
+function sendDynamicStudentMenu(chatId, userData) {
+var keyboardRows = [];
+
+// 1. الأزرار الثابتة والأساسية المدمجة بالنظام
+keyboardRows.push([{text: "✍️ إرسال شكوى"}, {text: "📮 صندوق تتبع الشكاوى (شكاويّ)"}]);
+keyboardRows.push([{text: "🧮 حاسبة المعدل الجامعي GPA"}, {text: "🚌 خطوط النقل والخدمات"}]);
+keyboardRows.push([{text: "❓ قسم الأسئلة الشائعة الذكي (FAQ)"}, {text: "⏰ مذكر الامتحانات والمحاضرات"}]);
+keyboardRows.push([{text: "👤 حسابي"}]);
+
+// 2. جلب الأزرار التخصيصية والمشروطة والمؤقتة سحابياً من صفحة الـ CMS
+try {
+var ss = SpreadsheetApp.openById(ssId);
+var sheet = ss.getSheetByName("Bot_CMS");
+if (sheet) {
+var data = sheet.getDataRange().getValues();
+var tempRow = [];
+for (var i = 1; i < data.length; i++) {
+var bText = data[i][0];
+var emoji = data[i][1];
+var visibility = data[i][3];
+var targetFaculty = data[i][6];
+var targetYear = data[i][7];
+
+// التحقق من الإخفاء والإظهار واستهداف فئة الطلاب
+if (visibility === "🟢") {
+if (targetFaculty === "" || targetFaculty.toString().trim() === userData.faculty.toString().trim()) {
+if (targetYear === "" || targetYear.toString().trim() === userData.year.toString().trim()) {
+
+var fullText = (emoji ? emoji + " " : "") + bText;
+tempRow.push({text: fullText});
+
+if (tempRow.length === 2) { // تنظيم Grid تخطيطي (زرين في السطر)
+keyboardRows.push(tempRow);
+tempRow = [];
+}
+}
+}
+}
+}
+if (tempRow.length > 0) keyboardRows.push(tempRow);
+}
+} catch(e) {}
+
+// إذا كان وضع الساندبوكس التجريبي مفعل، نضع زر الخروج العائم للأدمن بالأسفل
+if (config.getProperty("SANDBOX_MODE_" + chatId) === "true") {
+keyboardRows.push([{text: "🔙 إنهاء وضع الاختبار"}]);
+}
+
+var studentMenu = { keyboard: keyboardRows, resize_keyboard: true };
+var welcome = config.getProperty("MSG_WELCOME") || "أهلاً بك في نظام الهيئة الطلابية والخدمات الرقمية لجامعة AUST 🏛️";
+sendText(chatId, welcome, studentMenu);
+}
+
+function handleDynamicCMSButtonPress(chatId, text, userData) {
+try {
+var ss = SpreadsheetApp.openById(ssId);
+var sheet = ss.getSheetByName("Bot_CMS");
+if (!sheet) return false;
+var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) {
+var bText = data[i][0];
+var emoji = data[i][1];
+var fullText = (emoji ? emoji + " " : "") + bText;
+
+if (text === fullText) {
+var type = data[i][4]; // text, url, submenu
+var content = data[i][5];
+
+// تسجيل الإحصائيات التحليلية للنقرات في الجدول
+var currentClicks = parseInt(data[i][8] || 0);
+sheet.getRange(i + 1, 9).setValue(currentClicks + 1);
+
+if (type === "url") {
+var urlKb = { inline_keyboard: [[{text: "🌐 فتح الرابط المباشر", url: content}]] };
+sendTextRaw(chatId, "🔗 اضغط على الزر أدناه للانتقال للرابط المطلوب بأمان:", urlKb);
+} else {
+sendText(chatId, content);
+}
+return true;
+}
+}
+} catch(e) {}
+return false;
+}
+
+// ========================================================
+// 🧮 المحرك الحسابي المتقدم للمعدلات والأكاديميات (GPA Calculator)
+// ========================================================
+function calculateAndSendGPA(chatId, rawText) {
+try {
+var lines = rawText.split("\n");
+var totalPoints = 0;
+var totalHours = 0;
+var details = "📈 تفصيل درجات ومعدل المواد:\n\n";
+
+for (var i = 0; i < lines.length; i++) {
+if (!lines[i].includes(":")) continue;
+var parts = lines[i].split(":");
+var grade = parseFloat(parts[0].trim());
+var hours = parseFloat(parts[1].trim());
+
+if (isNaN(grade) || isNaN(hours)) continue;
+
+// تحويل نظام العلامات المئوية في AUST إلى نقاط النقاط الأكاديمية (4.0 Scale)
+var points = 0;
+var statusStr = "ناجح ✅";
+if (grade >= 90) points = 4.0;
+else if (grade >= 85) points = 3.5;
+else if (grade >= 80) points = 3.0;
+else if (grade >= 75) points = 2.5;
+else if (grade >= 70) points = 2.0;
+else if (grade >= 60) points = 1.5;
+else if (grade >= 50) points = 1.0;
+else { points = 0.0; statusStr = "راسب ❌"; }
+
+totalPoints += (points * hours);
+totalHours += hours;
+details += "🔹 مادة بواقع (" + hours + " س): علامة " + grade + " ➡️ نقاط: " + points + " [" + statusStr + "]\n";
+}
+
+if (totalHours === 0) {
+sendText(chatId, "❌ لم يتم إدخال البيانات بصيغة صحيحة. يرجى مراجعة المثال الموضح وإعادة المحاولة.");
+return;
+}
+
+var finalGPA = (totalPoints / totalHours).toFixed(2);
+details += "\n=========================\n🧮 المعدل الفصلي النهائي الناتج: " + finalGPA + " / 4.00";
+
+sendText(chatId, details);
+} catch(e) {
+sendText(chatId, "❌ حدث خطأ في معالجة العمليات الحسابية للمعدل.");
+}
+}
+
+// ========================================================
+// 🚌 محرك خطوط النقل والمحافظات (باصات الجامعة)
+// ========================================================
+function sendBusLineDetails(chatId, city) {
+var msg = "🚌 مواعيد وتفاصيل خط نقليات (" + city + "):\n\n";
+if (city.includes("طيبة الإمام")) {
+msg += "📍 مسار الانطلاق: ريف حماه الشمالي (طيبة الإمام - المشفى الوطني - مفرق صوران)\n⏰ موعد التحرك الصباحي: 07:15 صباحاً\n👤 سائق الباص الرئيسي: أبو أحمد (0933XXXXXX)\n⚠️ تنبيه: الباص ملتزم بالتحرك بالوقت تماماً دون انتظار.";
+} else if (city.includes("حماه")) {
+msg += "📍 مسار الانطلاق: ساحة العاصي - مفرق جنوب الملعب - كراج حمص\n⏰ مواعيد التحرك: وجبتين (07:30 صباحاً) و (08:30 صباحاً)\n👤 المشرف العام للخط: الأستاذ مأمون (0944XXXXXX)";
+} else {
+msg += "📍 باصات المحافظات الأخرى تتحرك بشكل منظم وفقاً لجداول الامتحانات والمحاضرات الموحدة.\nللاستفسار الطارئ يرجى مراجعة مكتب الخدمات اللوجستية بالجامعة.";
+}
+sendText(chatId, msg);
+}
+
+// ========================================================
+// 📋 محركات إدارة الشكاوى وتوزيعها الذكي
+// ========================================================
+function recordTicket(chatId, text, userData) {
+var ss = SpreadsheetApp.openById(ssId); var sheet1 = ss.getSheetByName("الشكاوى"); var dateStr = Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd HH:mm:ss");
+var priority = (text.includes("عاجل") || text.includes("طوارئ")) ? "عاجل 🔥" : "عادي";
+
+sheet1.appendRow([dateStr, sheet1.getLastRow(), userData.name, userData.phone, userData.uniId, chatId, "عامة", text, priority, "قيد الانتظار", userData.faculty, ""]);
+var ticketRow = sheet1.getLastRow(); config.deleteProperty(chatId);
+sendText(chatId, "✅ تم استلام شكواك وتوثيقها برقم تذكرة مركزي #" + (ticketRow - 1) + " . سيصلك إشعار فوري هنا على الحساب بمجرد مراجعتها والرد عليها.");
+
+var alertMsg = "⚠️ تذكرة شكوى جديدة بقسمك!\n\n👤 المرسل: " + userData.name + "\n🎓 الكلية: " + userData.faculty + "\n📝 نص الشكوى: " + text + "\n🚨 الأولوية: " + priority;
+var replyKb = { inline_keyboard: [[{ text: "💬 تواصل", url: "tg://user?id=" + chatId }, { text: "✍️ الرد الفوري", callback_data: "admin_reply_" + chatId + "_" + ticketRow }]] };
+
+// توزيع الشكوى آلياً وبصورة حصرية لمشرف الكلية المختص بحسب البيانات
+var sheetConfig = ss.getSheetByName("الصلاحيات");
+if (sheetConfig) {
+var dataConfig = sheetConfig.getDataRange().getValues();
+for (var i = 1; i < dataConfig.length; i++) {
+if (dataConfig[i][2].toString().trim() === userData.faculty.toString().trim()) {
+sendText(dataConfig[i][0].toString().trim(), "📥 إشعار خاص بقسمك:\n" + alertMsg, replyKb);
+}
+}
+}
+if (chatId !== adminId) { sendText(adminId, "👑 [إشعار الإدارة العليا]:\n" + alertMsg, replyKb); }
+}
+
+function sendCentralTickets(chatId) {
+var ss = SpreadsheetApp.openById(ssId); var sheet = ss.getSheetByName("الشكاوى"); if (!sheet) return;
+var data = sheet.getDataRange().getValues(); var count = 0;
+for (var i = 1; i < data.length; i++) {
+if (data[i][9].toString().trim() !== "تمت المعالجة") {
+var alertMsg = "⚠️ تذكرة شكوى معلقة:\n\nرقم التذكرة: #" + data[i][1] + "\n👤 الكلية: " + data[i][10] + "\n📝 الشكوى: " + data[i][7];
+var replyKb = { inline_keyboard: [[{ text: "✍️ الرد وإغلاق", callback_data: "admin_reply_" + data[i][5] + "_" + (i + 1) }]] };
+sendText(chatId, alertMsg, replyKb); count++;
+}
+}
+if(count === 0) sendText(chatId, "🟢 لا توجد شكاوى معلقة أو غير معالجة في النظام حالياً.");
+}
+
+function sendSubAdminTickets(chatId, faculty) {
+var ss = SpreadsheetApp.openById(ssId); var sheet = ss.getSheetByName("الشكاوى"); if (!sheet) return;
+var data = sheet.getDataRange().getValues(); var count = 0;
+for (var i = 1; i < data.length; i++) {
+if (data[i][10].toString().trim() === faculty && data[i][9].toString().trim() !== "تمت المعالجة") {
+var alertMsg = "⚠️ تذكرة شكوى بقسمك:\n\n👤 المرسل: " + data[i][2] + "\n📝 الشكوى: " + data[i][7];
+var replyKb = { inline_keyboard: [[{ text: "✍️ الرد السريع", callback_data: "admin_reply_" + data[i][5] + "_" + (i + 1) }]] };
+sendText(chatId, alertMsg, replyKb); count++;
+}
+}
+if(count === 0) sendText(chatId, "🟢 لا توجد شكاوى معلقة خاصة بكلية " + faculty);
+}
+
+function sendStudentTicketTracker(chatId) {
+var ss = SpreadsheetApp.openById(ssId); var sheet = ss.getSheetByName("الشكاوى"); if (!sheet) return;
+var data = sheet.getDataRange().getValues(); var found = false;
+var trackerMsg = "📮 أرشيف وتتبع تذاكر الشكاوى الخاصة بك:\n\n";
+for (var i = 1; i < data.length; i++) {
+if (data[i][5].toString().trim() === chatId.toString().trim()) {
+trackerMsg += "🎫 تذكرة #" + data[i][1] + "\n📝 الموضوع: " + data[i][7] + "\n상 حالة التذكرة: " + data[i][9] + " \n💬 رد المشرف: " + (data[i][11] || "لا يوجد رد بعد") + "\n---------------------\n";
+found = true;
+}
+}
+if (!found) trackerMsg = "📭 ليس لديك أي تذاكر شكاوى مسجلة في النظام حالياً.";
+sendText(chatId, trackerMsg);
+}
+
+// ========================================================
+// 🛡️ الميزات الرقابية والحظر وسجل العمليات (Audit Logs)
+// ========================================================
+function logAdminAction(adminChatId, action, department) {
+try {
+var ss = SpreadsheetApp.openById(ssId);
+var sheet = ss.getSheetByName("سجل العمليات (Audit_Logs)");
+var dateStr = Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd HH:mm:ss");
+sheet.appendRow([dateStr, adminChatId, department, action]);
+} catch(e) {}
+}
+
+function isUserBanned(chatId) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول");
+var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) {
+if (data[i][5].toString().trim() === chatId.toString().trim() && data[i][8] === "محظور 🚫") return true;
+}
+} catch(e){}
+return false;
+}
+
+function isSpamming(chatId) {
+var now = new Date().getTime();
+var lastPress = config.getProperty("SPAM_" + chatId);
+if (lastPress && (now - parseInt(lastPress) < 2000)) { // مهلة حماية تبلغ ثانيتين
+config.setProperty("SPAM_" + chatId, now.toString());
+return true;
+}
+config.setProperty("SPAM_" + chatId, now.toString());
+return false;
+}
+
+// ========================================================
+// 📊 محركات فحص الرتب والبيانات التحليلية المتقدمة
+// ========================================================
+function checkUserRole(chatId, role) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("الصلاحيات"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) { if (data[i][0].toString().trim() === chatId.toString().trim() && data[i][2].toString().trim() === role) return true; }
+} catch(e){} return false;
+}
+
+function getSubAdminFacultyAndRole(chatId) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("الصلاحيات"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) {
+if (data[i][0].toString().trim() === chatId.toString().trim() && !data[i][2].toString().trim().includes("أدمن عام")) {
+return { faculty: data[i][1], role: data[i][2] };
+}
+}
+} catch(e) {} return null;
+}
+
+function getFacultyStats(faculty) {
+var ss = SpreadsheetApp.openById(ssId); var sheet1 = ss.getSheetByName("الشكاوى"); if (!sheet1) return "لا توجد شكاوى.";
+var ticketsData = sheet1.getDataRange().getValues(); var total = 0, solved = 0;
+for (var i = 1; i < ticketsData.length; i++) { if (ticketsData[i][10].toString().trim() === faculty) { total++; if (ticketsData[i][9] === "تمت المعالجة") solved++; } }
+return "📊 إحصائيات قسم كليتك الفورية:\n\n🏢 الكلية: " + faculty + "\n📝 إجمالي الشكاوى المستلمة: " + total + "\n✅ الشكاوى التي تم حلها: " + solved + "\n⏳ الشكاوى العالقة قيد الانتظار: " + (total - solved);
+}
+
+function getUserInfo(chatId) {
+var sheet0 = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول"); if (!sheet0 || sheet0.getLastRow() === 0) return null;
+var data0 = sheet0.getDataRange().getValues();
+for (var i = 1; i < data0.length; i++) {
+if (data0[i][5] == chatId) return { name: data0[i][2], phone: data0[i][3], uniId: data0[i][4], year: data0[i][7] || "غير محدد", faculty: data0[i][6], isBanned: data0[i][8] };
+} return null;
+}
+
+// ========================================================
+// 🕒 نظام الجدولة الزمنية والنسخ الاحتياطي التلقائي (CronJob)
+// ========================================================
+function executeScheduledTasks() {
+try {
+var ss = SpreadsheetApp.openById(ssId);
+var sheet = ss.getSheetByName("الجدولة والنسخ الاحتياطي");
+if (!sheet) return;
+var data = sheet.getDataRange().getValues();
+var nowStr = Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd HH:mm");
+
+for (var i = 1; i < data.length; i++) {
+var type = data[i][1]; var content = data[i][2]; var targetTime = data[i][3]; var status = data[i][4];
+
+if (status === "قيد الانتظار" && targetTime.toString().trim() === nowStr) {
+if (type === "إعلان مجدول") {
+broadcastToAllStudents(content);
+sendToOfficialChannel("📢 إعلان رسمي مجدول صادر عن الهيئة الطلابية:\n\n" + content);
+}
+sheet.getRange(i + 1, 5).setValue("تم النشر بنجاح ✅");
+}
+}
+
+// محاكي النسخ الاحتياطي التلقائي (يوم الجمعة)
+var dayOfWeek = Utilities.formatDate(new Date(), "GMT+3", "u"); // 5 تعني يوم الجمعة
+if (dayOfWeek === "5" && config.getProperty("WEEKLY_BACKUP_DONE") !== nowStr.split(" ")[0]) {
+sendSpreadsheetAsExcel(adminId, "📦 النسخ الاحتياطي الأسبوعي التلقائي (يوم الجمعة)");
+config.setProperty("WEEKLY_BACKUP_DONE", nowStr.split(" ")[0]);
+}
+} catch(e){}
+}
+
+// ========================================================
+// 🖨️ محرك المراسلات وتوزيع البيانات الفوري
+// ========================================================
+function broadcastToAllStudents(msgText) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) { var sId = data[i][5]; if (sId) { sendText(sId, "🔔 إعلان رسمي عام جديد:\n\n" + msgText); Utilities.sleep(50); } }
+} catch(e){}
+}
+
+function broadcastToFacultyStudents(faculty, msgText) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) {
+var sId = data[i][5]; var fName = data[i][6];
+if (sId && fName.toString().trim() === faculty.toString().trim()) {
+sendText(sId, "📢 إعلان رسمي موجه ومخصص لكليتك:\n\n" + msgText); Utilities.sleep(50);
+}
+}
+} catch(e){}
+}
+
+function handleCallbacks(query) {
+var chatId = query.message.chat.id; var data = query.data;
+
+if (data.startsWith("sand_setfac_")) {
+var fac = data.split("sand_setfac_")[1];
+config.setProperty("SANDBOX_FACULTY_" + chatId, fac);
+var yearMenu = { inline_keyboard: [[{text:"سنة أولى", callback_data:"sand_setyr_سنة أولى"}], [{text:"سنة ثانية", callback_data:"sand_setyr_سنة ثانية"}], [{text:"سنة رابعة", callback_data:"sand_setyr_سنة رابعة"}], [{text:"سنة خامسة", callback_data:"sand_setyr_سنة خامسة"}]] };
+sendText(chatId, "🧪 اختر الآن السنة الدراسية لإتمام بناء الملف الوهمي التجريبي:", yearMenu);
+}
+if (data.startsWith("sand_setyr_")) {
+var yr = data.split("sand_setyr_")[1];
+config.setProperty("SANDBOX_YEAR_" + chatId, yr);
+config.setProperty("SANDBOX_MODE_" + chatId, "true");
+config.deleteProperty(chatId);
+sendText(chatId, "🧪 تم تفعيل بيئة الاختبار (Sandbox Mode) بنجاح!\nالبوت يتعامل معك الآن كأنك طالب حقيقي بالكلية والسنة المحددة.\nأرسل أمر /start لفتح الواجهة التجريبية المخصصة ورؤية شكل الأزرار.");
+}
+if (data.startsWith("admin_reply_")) {
+var parts = data.split(""); var studentChatId = parts[2]; var ticketRow = parts[3];
+config.setProperty(chatId, "REPLY_TO_TICKET" + studentChatId + "" + ticketRow); sendText(chatId, "✍️ أرسل الآن نص الرد الرسمي ليتم توجيهه لحساب الطالب فورا وإغلاق التذكرة:");
+}
+if (data === "mod_name") { config.setProperty(chatId, "MOD_NAME"); sendText(chatId, "✍️ أرسل اسمك الثلاثي الجديد والمعدل الآن:"); }
+if (data === "mod_faculty") { config.setProperty(chatId, "MOD_FACULTY"); sendFacultyKeyboard(chatId, "🎓 اختر الكلية الجديدة المراد الانتقال إليها:"); }
+if (data === "mod_uniid") { config.setProperty(chatId, "MOD_UNIID"); sendText(chatId, "🔢 أرسل رقمك الجامعي الجديد لتعديله:"); }
+if (data.startsWith("setfac")) {
+var facultyName = data.split("_")[1]; var lastState = config.getProperty(chatId);
+if (lastState === "WAIT_FACULTY") {
+var name = config.getProperty(chatId + "_N"); var phone = config.getProperty(chatId + "_P"); var uniId = config.getProperty(chatId + "_U"); var year = config.getProperty(chatId + "_Y");
+var ss = SpreadsheetApp.openById(ssId); var sheet0 = ss.getSheetByName("احصائيات الدخول");
+sheet0.appendRow([new Date(), sheet0.getLastRow(), name, phone, uniId, chatId, facultyName, year, "نشط ✅"]);
+config.deleteProperty(chatId); config.deleteProperty(chatId + "_N"); config.deleteProperty(chatId + "_P"); config.deleteProperty(chatId + "_U"); config.deleteProperty(chatId + "_Y");
+sendText(adminId, "🆕 طالب جديد انضم للمنظومة: " + name + " - كلية " + facultyName + " (" + year + ")");
+sendDynamicStudentMenu(chatId, {faculty: facultyName, year: year});
+} else {
+updateStudentFieldInSheet(chatId, 6, facultyName); config.deleteProperty(chatId); sendText(chatId, "✅ تم تحديث كليتك بنجاح.");
+}
+}
+
+// معالجة الأسئلة الشائعة الفورية
+if (data.startsWith("faq_")) {
+var key = data.split("faq_")[1];
+if (key === "docs") sendText(chatId, "📂 الوثائق المطلوبة للتسجيل في جامعة AUST:\n1. وثيقة الشهادة الثانوية الأصلية + 3 صور مصدقة عنها.\n2. صورة عن الهوية الشخصية أو سند الإقامة.\n3. صور شخصية عدد 6 خلفية بيضاء.\n4. مصنف التسجيل مدمجاً بطلب الانتساب للهيئة الطلابية.");
+if (key === "objections") sendText(chatId, "🎖️ شروط الاعتراض على الدرجات الامتحانية:\nيحق للطالب تقديم طلب اعتراض على علامة الامتحان خلال مدة أقصاها 5 أيام عمل من تاريخ صدور النتيجة الرسمية للقسم عبر مكتب شؤون الطلاب، برسم مالي رمزي مسترد في حال ثبوت صحة الاعتراض.");
+if (key === "military") sendText(chatId, "🎖️ الحصول على مصدقة تأجيل التجنيد:\nيتم استخراج وثيقة الحياة الجامعية (موجهة لشعبة التجنيد) من دائرة الامتحانات المركزية بعد تسديد كامل الأقساط الربعية واستكمال ملف التوثيق الموحد.");
+}
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/answerCallbackQuery?callback_query_id=" + query.id);
+}
+
+function sendSpreadsheetAsExcel(chatId, captionTxt) {
+try {
+var url = "https://docs.google.com/spreadsheets/d/" + ssId + "/export?format=xlsx";
+var response = UrlFetchApp.fetch(url, { headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+var blob = response.getBlob(); var dateStr = Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd");
+blob.setName("AUST_Ultimate_Backup_" + dateStr + ".xlsx");
+var payload = { chat_id: chatId, document: blob, caption: "📦 " + captionTxt + " \nقواعد البيانات مشفرة وآمنة بالكامل." };
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/sendDocument", { method: "post", payload: payload });
+} catch (e) { sendText(chatId, "❌ حدث خطأ أثناء التصدير: " + e.toString()); }
+}
+
+function checkRequiredChannels(chatId) {
+var channels = ["@AUSTBotNews"];
+for (var i = 0; i < channels.length; i++) {
+try {
+var res = UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/getChatMember?chat_id=" + channels[i] + "&user_id=" + chatId);
+var status = JSON.parse(res.getContentText()).result.status;
+if (status === "left" || status === "kicked") return false;
+} catch(e) { return true; }
+} return true;
+}
+
+function sendRequiredChannelsMessage(chatId) {
+var links = "⚠️ عذراً عزيزي الطالب، يجب عليك الاشتراك في قناة التحديثات الرسمية أولاً لتفعيل البوت واستخدامه بنجاح:\n\n📢 @AUSTBotNews\n\nبعد الانضمام، اضغط على /start بالأسفل لتفتح لك واجهة الخدمات الشاملة مباشرة! ✅";
+sendTextRaw(chatId, links);
+}
+
+function updateStudentFieldInSheet(chatId, colIndex, newValue) {
+try {
+var sheet = SpreadsheetApp.openById(ssId).getSheetByName("احصائيات الدخول"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) { if (data[i][5].toString().trim() === chatId.toString().trim()) { sheet.getRange(i + 1, colIndex + 1).setValue(newValue); break; } }
+} catch(e){}
+}
+
+function logChannelSubscriber(chatId, firstName, username) {
+try {
+var ss = SpreadsheetApp.openById(ssId); var sheet = ss.getSheetByName("توثيق المشتركين"); var data = sheet.getDataRange().getValues();
+for (var i = 1; i < data.length; i++) { if (data[i][0].toString().trim() === chatId.toString().trim()) return; }
+var userHandle = username ? "@" + username : "لا يوجد معرف";
+sheet.appendRow([chatId, firstName, userHandle, Utilities.formatDate(new Date(), "GMT+3", "yyyy-MM-dd HH:mm:ss"), "مشترك نشط ✅"]);
+} catch(e) {}
+}
+
+function sendFacultyKeyboard(chatId, message) {
+var rows = []; for (var i = 0; i < faculties.length; i++) { rows.push([{text: faculties[i], callback_data: "setfac_" + faculties[i]}]); }
+sendText(chatId, message, {inline_keyboard: rows});
+}
+
+function isMenu(text) { return text.startsWith("/") || ["✍️ إرسال شكوى", "👤 حسابي", "📊 تصدير التقارير المتقدمة", "⚠️ صندوق الشكاوى المركزي", "⚙️ إعدادات نصوص الأزرار (CMS)", "🕒 جدولة الإعلانات", "🚌 خطوط النقل والخدمات", "🧮 حاسبة المعدل الجامعي GPA", "❓ قسم الأسئلة الشائعة الذكي (FAQ)", "⏰ مذكر الامتحانات والمحاضرات", "🔙 لوحة الإدارة العليا", "🔙 لوحة الكلية", "📥 صندوق شكاوى الكلية", "📢 إعلانات الكلية الموجهة", "👥 إدارة طلاب الكلية", "🎛️ تخصيص محلي للأزرار", "🔙 إنهاء وضع الاختبار", "🔙 القائمة الرئيسية للطلاب", "📮 صندوق تتبع الشكاوى (شكاويّ)"].includes(text); }
+
+function sendText(chatId, text, kb) {
+var payload = { "chat_id": chatId, "text": text, "parse_mode": "Markdown", "reply_markup": kb ? JSON.stringify(kb) : undefined };
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/sendMessage", { "method": "post", "contentType": "application/json", "payload": JSON.stringify(payload) });
+}
+
+function sendTextRaw(chatId, text, kb) {
+var payload = { "chat_id": chatId, "text": text, "reply_markup": kb ? JSON.stringify(kb) : undefined };
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/sendMessage", { "method": "post", "contentType": "application/json", "payload": JSON.stringify(payload) });
+}
+
+function sendToOfficialChannel(msgText) {
+try {
+var payload = { "chat_id": "@AUSTBotNews", "text": msgText, "parse_mode": "Markdown" };
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/sendMessage", { "method": "post", "contentType": "application/json", "payload": JSON.stringify(payload) });
+} catch(e){}
+}
+
+// ========================================================
+// 🛠️ البناء والهيكلة التلقائية لجداول المنظومة بالكامل
+// ========================================================
+function checkAndSetupSheets() {
+var ss = SpreadsheetApp.openById(ssId);
+var sheetsInfo = {
+"احصائيات الدخول": ["Date", "ID", "الاسم الكامل", "رقم الهاتف", "الرقم الجامعي", "UserID", "الكلية", "السنة الدراسية", "حالة الحظر"],
+"الشكاوى": ["Date", "ID", "الاسم", "الرقم", "الجامعي", "UserID", "النوع", "الشكوى", "الأولوية", "الحالة", "الكلية", "الرد"],
+"الصلاحيات": ["آيدي المشرف", "اسم الكلية / الأدمن", "نوع الصلاحية المحددة"],
+"توثيق المشتركين": ["آيدي المستخدم", "الاسم الأول", "المعرف (Username)", "تاريخ تفعيل الاشتراك", "الحالة"],
+"Bot_CMS": ["Button_Text", "Emoji", "Row_Index", "Visibility", "Type", "Content_Or_Link", "Target_Faculty", "Target_Year", "Click_Count"],
+"الجدولة والنسخ الاحتياطي": ["تاريخ التوثيق", "نوع الإجراء", "نص المحتوى", "تاريخ النشر المجدول", "الحالة"],
+"سجل العمليات (Audit_Logs)": ["التاريخ والوقت", "Chat ID للإداري", "القسم / الكلية", "الإجراء المتخذ تفصيلاً"]
+};
+for (var sheetName in sheetsInfo) {
+var sheet = ss.getSheetByName(sheetName);
+if (!sheet) {
+sheet = ss.insertSheet(sheetName);
+sheet.appendRow(sheetsInfo[sheetName]);
+if (sheetName === "Bot_CMS") {
+// إضافة أسطر توضيحية افتراضية لتسهيل الإدارة من الشيت مباشرة
+sheet.appendRow(["موقع الجامعة الرسمي", "🌐", "1", "🟢", "url", "https://aust.edu.sy", "", "", "0"]);
+sheet.appendRow(["منصة التعليم Learnata", "🎓", "2", "🟢", "url", "https://learnata.aust.edu.sy", "", "", "0"]);
+sheet.appendRow(["مشاريع التخرج", "📁", "3", "🟢", "text", "هذا النص يظهر فقط لطلاب السنة الرابعة والخامسة هندسة معلوماتية!", "هندسة المعلوماتية", "سنة رابعة", "0"]);
+}
+}
+}
+}
+
+function setWebhook() {
+var webAppUrl = "ضع_رابط_الويب_آب_هنا_بعد_النشر";
+UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/setWebhook?url=" + webAppUrl);
+}
+الاضافات
+📋 المخطط التقني لنظام البوت الجامعي (V7.0+)
+🎯 الهدف العام
+تحويل منصة تيليجرام إلى نظام تشغيل جامعي متكامل يعتمد على أتمتة Google Apps Script لتقديم الخدمات الطلابية والإدارية بكفاءة عالية.
+
+───
+
+1️⃣ نظام إدارة الشكاوى (Ticketing Engine)
+🔹 نظام التذاكر الديناميكي
+• إنشاء رقم فريد لكل شكوى.
+• تتبع حالة الشكوى: 
+◦ معلق.
+◦ قيد المراجعة.
+◦ تم الحل.
+🔹 التصنيف الذكي
+• تحليل محتوى الشكوى.
+• توجيهها تلقائياً إلى القسم المختص باستخدام الكلمات المفتاحية.
+🔹 الردود المقترحة
+• الاستفادة من الذكاء الاصطناعي لتوليد ردود جاهزة للمشرفين.
+• تقليل زمن الاستجابة وتحسين جودة الدعم.
+🔹 نظام التصعيد التلقائي
+• مراقبة الشكاوى المفتوحة.
+• تصعيد أي شكوى تتجاوز 48 ساعة دون معالجة إلى المشرف الأعلى.
+🔹 نظام التغذية الراجعة
+• إرسال استبيان رضا للطالب بعد إغلاق التذكرة.
+• قياس جودة الخدمة ومتابعة الأداء.
+
+───
+
+2️⃣ الإدارة والتحكم (Dashboard & Admin)
+🔹 لوحة السوبر أدمن
+• إحصائيات لحظية.
+• إدارة المشرفين.
+• إدارة الحظر.
+• التحكم الكامل بإعدادات البوت.
+🔹 نظام صلاحيات الكليات (Sub-Admin)
+• توزيع الصلاحيات حسب الكلية أو القسم.
+• سجل تدقيق (Audit Logs) لكل العمليات الإدارية.
+🔹 نظام الصيانة (Maintenance Mode)
+• إيقاف البوت عند الحاجة.
+• تفعيل بيئة اختبار (Sandbox) لتجربة الميزات الجديدة.
+🔹 التقارير الدورية
+• إنشاء تقرير PDF أسبوعي تلقائياً.
+• عرض مؤشرات الأداء (KPIs).
+• تحليل نشاط المشرفين وأداء الأقسام.
+
+───
+
+3️⃣ الخدمات الطلابية الأكاديمية
+🔹 حاسبة المعدل
+• حساب المعدل الفصلي.
+• حساب المعدل التراكمي.
+• دعم أنظمة التقييم المختلفة.
+🔹 البحث في الأرشيف
+• أمر /search للبحث داخل: 
+◦ ملفات PDF.
+◦ المحاضرات.
+◦ المستندات المرفوعة.
+🔹 التنبيهات الذكية
+• ربط الجداول الدراسية مع Google Calendar.
+• إرسال تذكيرات تلقائية بالمحاضرات والامتحانات.
+🔹 خدمات النقل
+• دليل تفاعلي للباصات الجامعية.
+• عرض المسارات والمواعيد.
+🔹 التواصل المجهول
+• إمكانية إرسال الشكاوى الحساسة دون إظهار هوية الطالب.
+• حماية الخصوصية وتعزيز الثقة.
+
+───
+
+4️⃣ الهندسة التقنية والاستقرار
+🔹 الأتمتة المتقدمة
+• استخدام Triggers و Queues.
+• توزيع العمليات لتجنب مشاكل Timeout.
+🔹 الأداء العالي
+• تطبيق Batch Operations.
+• تقليل عدد عمليات القراءة والكتابة على Google Sheets.
+🔹 النسخ الاحتياطي
+• إنشاء نسخ احتياطية يومية.
+• أرشفة البيانات القديمة بشكل تلقائي.
+🔹 قابلية التوسع
+• تصميم مرن يدعم الانتقال مستقبلاً إلى: 
+◦ Firebase.
+◦ Cloud SQL.
+◦ أي بنية سحابية متقدمة.
+
+───
+
+5️⃣ الذكاء الاصطناعي والتفاعل
+🔹 المساعد الذكي
+• دمج Gemini API.
+• الإجابة على الاستفسارات الأكاديمية.
+• تلخيص الملفات والمستندات.
+🔹 تحليل البيانات
+• إنشاء Heatmaps لأوقات الذروة.
+• تحليل الشكاوى والأنشطة لاتخاذ قرارات إدارية أفضل.
+🔹 لوحة الشرف (Gamification)
+• نظام نقاط ومكافآت.
+• تشجيع المشاركة والتفاعل الطلابي.
+• إبراز الطلاب والمساهمين الأكثر نشاطاً.
+
+───
+
+6️⃣ الأمن والحماية
+🔹 التحقق الرقمي
+• نظام OTP لتأكيد هوية الطالب أثناء التسجيل.
+🔹 البصمة الرقمية للملفات
+• إنشاء Hash لكل ملف مرفوع.
+• ضمان سلامة المستندات ومنع التلاعب بها.
+🔹 الحماية من السبام
+• تطبيق Rate Limiting.
+• منع إساءة الاستخدام والضغط المفرط على النظام.
+🔹 تشفير البيانات
+• حماية المعلومات الشخصية.
+• تشفير الأرقام الجامعية والبيانات الحساسة داخل قواعد البيانات والجداول.
+
+───
+
+🚀 النتيجة النهائية
+منصة تيليجرام جامعية متكاملة تجمع بين:
+• إدارة الشكاوى الذكية.
+• الخدمات الأكاديمية.
+• الأتمتة المتقدمة.
+• التحليلات الإدارية.
+• الذكاء الاصطناعي.
+• أعلى معايير الأمان والاستقرار.
+لتصبح بمثابة "نظام تشغيل جامعي رقمي" يخدم الطلاب والإدارة من خلال واجهة موحدة وسهلة الاستخدام.
+بس هيك ان شاء الله
